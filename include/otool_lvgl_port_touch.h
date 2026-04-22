@@ -28,6 +28,12 @@ typedef struct {
         float x;                      /*!< X 轴缩放比例 */
         float y;                      /*!< Y 轴缩放比例 */
     } scale;
+    /**
+     * @brief 初始旋转角度（当 PPA 硬件旋转时 LVGL 不设置 display rotation，
+     *        需在此处直接指定以消除创建与 set_touch_rotation 之间的竞态窗口）。
+     *        使用 LV_DISPLAY_ROTATION_0 表示无独立旋转（跟随 display rotation）。
+     */
+    lv_display_rotation_t initial_rotation;
 } otool_lvgl_touch_cfg_t;
 
 /**
