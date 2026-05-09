@@ -82,6 +82,16 @@ lv_display_rotation_t otool_lvgl_port_get_touch_rotation(lv_indev_t *touch);
  * @return ESP_OK 成功
  */
 esp_err_t otool_lvgl_port_touch_reset(lv_indev_t *touch);
+
+/**
+ * @brief Get the latest touch points reported by the touch driver.
+ *
+ * @param touch LVGL touch input device
+ * @param points Output point buffer, can be NULL when only querying count
+ * @param max_points Maximum points to copy into points
+ * @return uint8_t Number of active touch points, capped to max_points when points is not NULL
+ */
+uint8_t otool_lvgl_port_get_touch_points(lv_indev_t *touch, lv_point_t *points, uint8_t max_points);
 #endif
 
 #ifdef __cplusplus

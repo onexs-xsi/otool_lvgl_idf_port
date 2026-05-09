@@ -496,3 +496,26 @@ esp_err_t otool_lvgl_port_touch_reset(lv_indev_t *touch)
     otool_lvgl_port_unlock();
     return ESP_OK;
 }
+
+uint8_t otool_lvgl_port_get_touch_points(lv_indev_t *touch, lv_point_t *points, uint8_t max_points)
+{
+    if (!touch) {
+        return 0;
+    }
+
+    otool_touch_ctx_t *ctx = (otool_touch_ctx_t *)lv_indev_get_driver_data(touch);
+    if (!ctx) {
+        return 0;
+    }
+
+    uint8_t count = ctx->last_touch_cnt;
+    if (!points || max_points == 0) {
+        return count;
+    }
+
+    if (count > max_points) {
+        count = max_points;
+    }
+    memcpy(points, ctx->last_points, sizeof(lv_point_t) * count);
+    return count;
+}
