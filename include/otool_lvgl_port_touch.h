@@ -71,6 +71,17 @@ esp_err_t otool_lvgl_port_set_touch_rotation(lv_indev_t *touch, lv_display_rotat
  * @return lv_display_rotation_t 当前旋转角度
  */
 lv_display_rotation_t otool_lvgl_port_get_touch_rotation(lv_indev_t *touch);
+
+/**
+ * @brief 清空触摸驱动内部缓存的按下对象
+ *
+ * UI 对象树即将被 lv_obj_clean/lv_obj_delete 重建前调用，避免多点触摸
+ * 模拟逻辑向已经删除的对象补发 RELEASED/PRESSING 事件。
+ *
+ * @param touch 输入设备句柄
+ * @return ESP_OK 成功
+ */
+esp_err_t otool_lvgl_port_touch_reset(lv_indev_t *touch);
 #endif
 
 #ifdef __cplusplus

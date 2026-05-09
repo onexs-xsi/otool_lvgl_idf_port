@@ -61,6 +61,44 @@ static void touch_obj_delete_cb(lv_event_t *e)
     }
 }
 
+static void touch_ctx_reset(otool_touch_ctx_t *ctx)
+{
+    if (!ctx) {
+        return;
+    }
+    ctx->last_touch_cnt = 0;
+    memset(ctx->last_points, 0, sizeof(ctx->last_points));
+    memset(ctx->point_press_time, 0, sizeof(ctx->point_press_time));
+    memset(ctx->point_repeat_time, 0, sizeof(ctx->point_repeat_time));
+    memset(ctx->point_target, 0, sizeof(ctx->point_target));
+    memset(ctx->pressed_obj_pool, 0, sizeof(ctx->pressed_obj_pool));
+}
+
+static bool touch_obj_is_valid(lv_obj_t *obj)
+{
+    return obj && lv_obj_is_valid(obj);
+}
+
+static void touch_send_event_if_valid(otool_touch_ctx_t *ctx, lv_obj_t *obj, lv_event_code_t code)
+{
+    if (touch_obj_is_valid(obj)) {
+        lv_obj_send_event(obj, code, NULL);
+        return;
+    }
+
+    if (!ctx) {
+        return;
+    }
+    for (int i = 0; i < 10; i++) {
+        if (ctx->pressed_obj_pool[i] == obj) {
+            ctx->pressed_obj_pool[i] = NULL;
+        }
+        if (ctx->point_target[i] == obj) {
+            ctx->point_target[i] = NULL;
+        }
+    }
+}
+
 /*******************************************************************************
  * Touch read callback
  ******************************************************************************/
@@ -203,15 +241,15 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
                 
                 // Send PRESSING state (Except Primary - LVGL sends it)
                 if(!is_primary_target) {
-                    lv_obj_send_event(t, LV_EVENT_PRESSING, NULL);
+                    touch_send_event_if_valid(ctx, t, LV_EVENT_PRESSING);
                 }
 
                 // Handle Key Repeat (For BOTH Primary and Secondary)
                 // Skip Checkable objects (like Shift key)
-                if(!lv_obj_has_flag(t, LV_OBJ_FLAG_CHECKABLE)) {
+                if(touch_obj_is_valid(t) && !lv_obj_has_flag(t, LV_OBJ_FLAG_CHECKABLE)) {
                     if (now - new_press_time[i] > 1000) { // 1 sec delay
                         if (now - new_repeat_time[i] > 200) { // 200ms rate
-                             lv_obj_send_event(t, LV_EVENT_CLICKED, NULL);
+                             touch_send_event_if_valid(ctx, t, LV_EVENT_CLICKED);
                              new_repeat_time[i] = now;
                         }
                     }
@@ -227,8 +265,8 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
                 lv_obj_add_event_cb(t, touch_obj_delete_cb, LV_EVENT_DELETE, ctx);
                 
                 if (!is_primary_target) {
-                    lv_obj_send_event(t, LV_EVENT_PRESSED, NULL);
-                    lv_obj_send_event(t, LV_EVENT_CLICKED, NULL); // Instant click for secondary
+                    touch_send_event_if_valid(ctx, t, LV_EVENT_PRESSED);
+                    touch_send_event_if_valid(ctx, t, LV_EVENT_CLICKED); // Instant click for secondary
                 }
             }
         }
@@ -298,7 +336,7 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
                 // No.
                 
                 // Let's try sending it. If bugs arise, we fix.
-                lv_obj_send_event(old_t, LV_EVENT_RELEASED, NULL);
+                touch_send_event_if_valid(ctx, old_t, LV_EVENT_RELEASED);
             }
         }
 
@@ -311,7 +349,7 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
         // Release ALL tracked secondary objects
         for(int j=0; j<10; j++) {
             if(ctx->pressed_obj_pool[j] != NULL) {
-                lv_obj_send_event(ctx->pressed_obj_pool[j], LV_EVENT_RELEASED, NULL);
+                touch_send_event_if_valid(ctx, ctx->pressed_obj_pool[j], LV_EVENT_RELEASED);
                 ctx->pressed_obj_pool[j] = NULL;
             }
         }
@@ -438,4 +476,23 @@ lv_display_rotation_t otool_lvgl_port_get_touch_rotation(lv_indev_t *touch)
         return lv_display_get_rotation(ctx->disp);
     }
     return LV_DISPLAY_ROTATION_0;
+}
+
+esp_err_t otool_lvgl_port_touch_reset(lv_indev_t *touch)
+{
+    if (!touch) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    otool_lvgl_port_lock(0);
+    otool_touch_ctx_t *ctx = (otool_touch_ctx_t *)lv_indev_get_driver_data(touch);
+    if (!ctx) {
+        otool_lvgl_port_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    touch_ctx_reset(ctx);
+    lv_indev_reset(touch, NULL);
+    otool_lvgl_port_unlock();
+    return ESP_OK;
 }
