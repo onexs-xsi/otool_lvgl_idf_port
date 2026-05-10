@@ -758,3 +758,30 @@ esp_err_t otool_lvgl_port_remove_disp(lv_display_t *disp)
 
     return ESP_OK;
 }
+
+/*******************************************************************************
+ * Public API: runtime PPA rotation update (no lv_display_set_rotation)
+ ******************************************************************************/
+esp_err_t otool_lvgl_port_set_ppa_rotation(lv_display_t *disp, lv_display_rotation_t rotation)
+{
+    if (!disp) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    otool_disp_ctx_t *ctx = (otool_disp_ctx_t *)lv_display_get_driver_data(disp);
+    if (!ctx || !ctx->flags.use_ppa || !ctx->flags.sw_rotate) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    // 直接修改 PPA 旋转角度，不经过 lv_display_set_rotation()
+    // 避免 LVGL 触发分辨率变更 + 缓冲区重分配导致花屏
+    ctx->current_rotation = rotation;
+
+    // 使当前屏幕全部失效，触发一次完整重绘
+    lv_obj_t *scr = lv_display_get_screen_active(disp);
+    if (scr) {
+        lv_obj_invalidate(scr);
+    }
+
+    return ESP_OK;
+}

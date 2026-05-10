@@ -127,6 +127,19 @@ esp_err_t otool_lvgl_port_remove_disp(lv_display_t *disp);
  */
 void otool_lvgl_port_flush_ready(lv_display_t *disp);
 
+/**
+ * @brief 在 PPA+avoid_tearing 模式下运行时更新旋转角度
+ *
+ * 此函数仅修改 PPA 旋转角度，不调用 lv_display_set_rotation()，
+ * 避免触发 LVGL 内部缓冲区重分配导致花屏。
+ * 需在 LVGL 锁内调用。
+ *
+ * @param disp  LVGL 显示句柄
+ * @param rotation 新旋转角度
+ * @return ESP_OK 成功; ESP_ERR_NOT_SUPPORTED 非 PPA 模式
+ */
+esp_err_t otool_lvgl_port_set_ppa_rotation(lv_display_t *disp, lv_display_rotation_t rotation);
+
 #ifdef __cplusplus
 }
 #endif
