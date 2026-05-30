@@ -43,6 +43,11 @@
 
 static const char *TAG = "otool_lvgl_disp";
 
+#ifndef OTOOL_LVGL_PORT_PERF_LOG
+#define OTOOL_LVGL_PORT_PERF_LOG 0
+#endif
+
+#if OTOOL_LVGL_PORT_PERF_LOG
 typedef struct {
     int64_t last_log_us;
     uint32_t flush_count;
@@ -109,6 +114,7 @@ static void disp_perf_record(uint32_t pixels,
     s_disp_perf.wait_us_sum = 0;
     s_disp_perf.last_log_us = now_us;
 }
+#endif
 
 /*******************************************************************************
  * Types definitions
@@ -331,10 +337,12 @@ static void disp_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_
     otool_disp_ctx_t *ctx = (otool_disp_ctx_t *)lv_display_get_driver_data(drv);
     assert(ctx != NULL);
 
+#if OTOOL_LVGL_PORT_PERF_LOG
     int64_t flush_start_us = esp_timer_get_time();
     uint64_t ppa_us = 0;
     uint64_t draw_us = 0;
     uint64_t wait_us = 0;
+#endif
     lv_area_t draw_area = *area;
     void *draw_buf = color_map;
 
@@ -377,9 +385,13 @@ static void disp_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_
                 ESP_LOGD(TAG, "PPA rotate: in=%ldx%ld, out=%ldx%ld, rot=%d",
                          lvgl_w, lvgl_h, phys_w, phys_h, ctx->current_rotation);
 
+#if OTOOL_LVGL_PORT_PERF_LOG
                 int64_t ppa_start_us = esp_timer_get_time();
+#endif
                 esp_err_t ret = ppa_do_rotate(ctx, color_map, &full_area, ctx->current_rotation, &draw_buf);
+#if OTOOL_LVGL_PORT_PERF_LOG
                 ppa_us += (uint64_t)(esp_timer_get_time() - ppa_start_us);
+#endif
                 if (ret != ESP_OK) {
                     ESP_LOGE(TAG, "PPA rotation failed: %s", esp_err_to_name(ret));
                     lv_disp_flush_ready(drv);
@@ -388,23 +400,33 @@ static void disp_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_
             }
 #endif
             ESP_LOGD(TAG, "DSI flush: draw_bitmap(0,0,%ld,%ld), buf=%p", phys_w, phys_h, draw_buf);
+#if OTOOL_LVGL_PORT_PERF_LOG
             int64_t draw_start_us = esp_timer_get_time();
+#endif
             esp_lcd_panel_draw_bitmap(ctx->panel_handle, 0, 0, phys_w, phys_h, draw_buf);
+#if OTOOL_LVGL_PORT_PERF_LOG
             draw_us += (uint64_t)(esp_timer_get_time() - draw_start_us);
+#endif
 
             // Wait for vsync
             if (ctx->trans_sem) {
+#if OTOOL_LVGL_PORT_PERF_LOG
                 int64_t wait_start_us = esp_timer_get_time();
+#endif
                 xSemaphoreTake(ctx->trans_sem, 0);
                 xSemaphoreTake(ctx->trans_sem, portMAX_DELAY);
+#if OTOOL_LVGL_PORT_PERF_LOG
                 wait_us += (uint64_t)(esp_timer_get_time() - wait_start_us);
+#endif
             }
+#if OTOOL_LVGL_PORT_PERF_LOG
             disp_perf_record((uint32_t)(phys_w * phys_h),
                              true,
                              (uint64_t)(esp_timer_get_time() - flush_start_us),
                              ppa_us,
                              draw_us,
                              wait_us);
+#endif
         }
         lv_disp_flush_ready(drv);
         return;
@@ -414,9 +436,13 @@ static void disp_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_
 #if OTOOL_LVGL_PORT_PPA_SUPPORTED
     // Handle PPA rotation for non-DSI displays or DSI without avoid_tearing
     if (ctx->flags.use_ppa && ctx->flags.sw_rotate && ctx->current_rotation != LV_DISPLAY_ROTATION_0) {
+#if OTOOL_LVGL_PORT_PERF_LOG
         int64_t ppa_start_us = esp_timer_get_time();
+#endif
         esp_err_t ret = ppa_do_rotate(ctx, color_map, &draw_area, ctx->current_rotation, &draw_buf);
+#if OTOOL_LVGL_PORT_PERF_LOG
         ppa_us += (uint64_t)(esp_timer_get_time() - ppa_start_us);
+#endif
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "PPA rotation failed: %s", esp_err_to_name(ret));
             lv_disp_flush_ready(drv);
@@ -431,11 +457,14 @@ static void disp_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_
     }
 
     // Partial update mode (default path) or DSI without avoid_tearing
+#if OTOOL_LVGL_PORT_PERF_LOG
     int64_t draw_start_us = esp_timer_get_time();
+#endif
     esp_lcd_panel_draw_bitmap(ctx->panel_handle,
                                draw_area.x1, draw_area.y1,
                                draw_area.x2 + 1, draw_area.y2 + 1,
                                draw_buf);
+#if OTOOL_LVGL_PORT_PERF_LOG
     draw_us += (uint64_t)(esp_timer_get_time() - draw_start_us);
     disp_perf_record((uint32_t)lv_area_get_size(&draw_area),
                      false,
@@ -443,6 +472,7 @@ static void disp_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_
                      ppa_us,
                      draw_us,
                      wait_us);
+#endif
 
     // For non-DSI displays or DSI without avoid_tearing,
     // flush_ready is called by panel IO callback or here for DSI

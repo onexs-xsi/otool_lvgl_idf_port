@@ -13,6 +13,10 @@
 
 static const char *TAG = "otool_lvgl_port";
 
+#ifndef OTOOL_LVGL_PORT_PERF_LOG
+#define OTOOL_LVGL_PORT_PERF_LOG 0
+#endif
+
 // LVGL 端口上下文
 typedef struct {
     TaskHandle_t task_handle;
@@ -25,6 +29,7 @@ typedef struct {
 
 static lvgl_port_ctx_t s_port_ctx{};
 
+#if OTOOL_LVGL_PORT_PERF_LOG
 typedef struct {
     int64_t last_log_us;
     uint32_t loops;
@@ -100,6 +105,8 @@ static void lvgl_task_perf_record_lock_timeout(void)
 }
 
 // LVGL 定时器回调
+#endif
+
 static void lvgl_tick_cb(void *arg)
 {
     lv_tick_inc(*(int *)arg);
@@ -117,12 +124,18 @@ static void lvgl_task(void *arg)
     while (s_port_ctx.running) {
         // 使用短超时而不是无限等待
         if (xSemaphoreTakeRecursive(s_port_ctx.lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+#if OTOOL_LVGL_PORT_PERF_LOG
             int64_t handler_start_us = esp_timer_get_time();
+#endif
             uint32_t sleep_ms = lv_timer_handler();
+#if OTOOL_LVGL_PORT_PERF_LOG
             uint64_t handler_us = (uint64_t)(esp_timer_get_time() - handler_start_us);
+#endif
             xSemaphoreGiveRecursive(s_port_ctx.lvgl_mutex);
 
+#if OTOOL_LVGL_PORT_PERF_LOG
             uint32_t raw_sleep_ms = sleep_ms;
+#endif
             if (sleep_ms == LV_NO_TIMER_READY ||
                 sleep_ms > (uint32_t)s_port_ctx.task_max_sleep_ms) {
                 sleep_ms = (uint32_t)s_port_ctx.task_max_sleep_ms;
@@ -130,10 +143,14 @@ static void lvgl_task(void *arg)
             if (sleep_ms < 1) {
                 sleep_ms = 1;
             }
+#if OTOOL_LVGL_PORT_PERF_LOG
             lvgl_task_perf_record(raw_sleep_ms, sleep_ms, handler_us);
+#endif
             vTaskDelay(pdMS_TO_TICKS(sleep_ms));
         } else {
+#if OTOOL_LVGL_PORT_PERF_LOG
             lvgl_task_perf_record_lock_timeout();
+#endif
             ESP_LOGW(TAG, "LVGL task: failed to acquire lock");
             vTaskDelay(pdMS_TO_TICKS(10));
         }
