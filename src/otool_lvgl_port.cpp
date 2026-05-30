@@ -25,6 +25,80 @@ typedef struct {
 
 static lvgl_port_ctx_t s_port_ctx{};
 
+typedef struct {
+    int64_t last_log_us;
+    uint32_t loops;
+    uint32_t lock_timeouts;
+    uint32_t zero_sleep_returns;
+    uint64_t handler_us_sum;
+    uint64_t handler_us_max;
+    uint64_t sleep_ms_sum;
+    uint32_t sleep_ms_max;
+} lvgl_task_perf_t;
+
+static lvgl_task_perf_t s_task_perf{};
+
+static void lvgl_task_perf_maybe_log(void)
+{
+    int64_t now_us = esp_timer_get_time();
+    if (s_task_perf.last_log_us == 0) {
+        s_task_perf.last_log_us = now_us;
+        return;
+    }
+
+    if (now_us - s_task_perf.last_log_us < 2000000) {
+        return;
+    }
+
+    uint32_t loops = s_task_perf.loops ? s_task_perf.loops : 1;
+    uint32_t stack_free = uxTaskGetStackHighWaterMark(NULL) * sizeof(StackType_t);
+    ESP_LOGI(TAG,
+             "perf: loops=%lu handler_avg=%lluus handler_max=%lluus "
+             "sleep_avg=%llums sleep_max=%lums zero_sleep=%lu lock_to=%lu stack_free=%luB",
+             (unsigned long)s_task_perf.loops,
+             (unsigned long long)(s_task_perf.handler_us_sum / loops),
+             (unsigned long long)s_task_perf.handler_us_max,
+             (unsigned long long)(s_task_perf.sleep_ms_sum / loops),
+             (unsigned long)s_task_perf.sleep_ms_max,
+             (unsigned long)s_task_perf.zero_sleep_returns,
+             (unsigned long)s_task_perf.lock_timeouts,
+             (unsigned long)stack_free);
+
+    s_task_perf.loops = 0;
+    s_task_perf.lock_timeouts = 0;
+    s_task_perf.zero_sleep_returns = 0;
+    s_task_perf.handler_us_sum = 0;
+    s_task_perf.handler_us_max = 0;
+    s_task_perf.sleep_ms_sum = 0;
+    s_task_perf.sleep_ms_max = 0;
+    s_task_perf.last_log_us = now_us;
+}
+
+static void lvgl_task_perf_record(uint32_t raw_sleep_ms,
+                                  uint32_t applied_sleep_ms,
+                                  uint64_t handler_us)
+{
+    ++s_task_perf.loops;
+    if (raw_sleep_ms == 0) {
+        ++s_task_perf.zero_sleep_returns;
+    }
+    s_task_perf.handler_us_sum += handler_us;
+    if (handler_us > s_task_perf.handler_us_max) {
+        s_task_perf.handler_us_max = handler_us;
+    }
+    s_task_perf.sleep_ms_sum += applied_sleep_ms;
+    if (applied_sleep_ms > s_task_perf.sleep_ms_max) {
+        s_task_perf.sleep_ms_max = applied_sleep_ms;
+    }
+    lvgl_task_perf_maybe_log();
+}
+
+static void lvgl_task_perf_record_lock_timeout(void)
+{
+    ++s_task_perf.lock_timeouts;
+    lvgl_task_perf_maybe_log();
+}
+
 // LVGL 定时器回调
 static void lvgl_tick_cb(void *arg)
 {
@@ -43,17 +117,23 @@ static void lvgl_task(void *arg)
     while (s_port_ctx.running) {
         // 使用短超时而不是无限等待
         if (xSemaphoreTakeRecursive(s_port_ctx.lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            int64_t handler_start_us = esp_timer_get_time();
             uint32_t sleep_ms = lv_timer_handler();
+            uint64_t handler_us = (uint64_t)(esp_timer_get_time() - handler_start_us);
             xSemaphoreGiveRecursive(s_port_ctx.lvgl_mutex);
 
-            if ((int)sleep_ms > s_port_ctx.task_max_sleep_ms) {
-                sleep_ms = s_port_ctx.task_max_sleep_ms;
+            uint32_t raw_sleep_ms = sleep_ms;
+            if (sleep_ms == LV_NO_TIMER_READY ||
+                sleep_ms > (uint32_t)s_port_ctx.task_max_sleep_ms) {
+                sleep_ms = (uint32_t)s_port_ctx.task_max_sleep_ms;
             }
             if (sleep_ms < 1) {
                 sleep_ms = 1;
             }
+            lvgl_task_perf_record(raw_sleep_ms, sleep_ms, handler_us);
             vTaskDelay(pdMS_TO_TICKS(sleep_ms));
         } else {
+            lvgl_task_perf_record_lock_timeout();
             ESP_LOGW(TAG, "LVGL task: failed to acquire lock");
             vTaskDelay(pdMS_TO_TICKS(10));
         }
