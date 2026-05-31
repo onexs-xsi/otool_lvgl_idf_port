@@ -132,6 +132,10 @@ typedef struct {
     lv_display_t              *disp_drv;
     lv_display_rotation_t     current_rotation;
     SemaphoreHandle_t         trans_sem;
+    // Deferred vsync wait: when true, a presented frame is in flight and we
+    // must wait for its refresh_done before reusing/overwriting a frame buffer.
+    // Lets LVGL render + PPA-rotate the next frame overlap the current scan-out.
+    bool                      present_pending;
 
 #if OTOOL_LVGL_PORT_PPA_SUPPORTED
     // PPA rotation context (ESP32-P4 only)
@@ -360,6 +364,25 @@ static void disp_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_
             int32_t phys_w = ctx->hres;  // 720
             int32_t phys_h = ctx->vres;  // 1280
 
+            // Deferred vsync wait: consume the previous frame's refresh_done here
+            // (instead of blocking right after its draw_bitmap). Between the
+            // previous present and now, LVGL has rendered this frame's dirty
+            // regions into its draw buffer, overlapping the previous scan-out.
+            // Only valid when PPA rotates into a dedicated DSI frame buffer; the
+            // alternate buffer guarantees the one being scanned is never touched.
+            bool ppa_to_fb = ctx->flags.use_ppa && ctx->flags.sw_rotate &&
+                             ctx->current_rotation != LV_DISPLAY_ROTATION_0;
+            if (ctx->present_pending && ctx->trans_sem) {
+#if OTOOL_LVGL_PORT_PERF_LOG
+                int64_t wait_start_us = esp_timer_get_time();
+#endif
+                xSemaphoreTake(ctx->trans_sem, portMAX_DELAY);
+#if OTOOL_LVGL_PORT_PERF_LOG
+                wait_us += (uint64_t)(esp_timer_get_time() - wait_start_us);
+#endif
+                ctx->present_pending = false;
+            }
+
 #if OTOOL_LVGL_PORT_PPA_SUPPORTED
             // For PPA rotation: rotate LVGL's buffer (1280x720) to physical screen (720x1280)
             if (ctx->flags.use_ppa && ctx->flags.sw_rotate && ctx->current_rotation != LV_DISPLAY_ROTATION_0) {
@@ -408,16 +431,29 @@ static void disp_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_
             draw_us += (uint64_t)(esp_timer_get_time() - draw_start_us);
 #endif
 
-            // Wait for vsync
             if (ctx->trans_sem) {
-#if OTOOL_LVGL_PORT_PERF_LOG
-                int64_t wait_start_us = esp_timer_get_time();
-#endif
+                // Drain any stale signal so the next refresh_done we observe
+                // belongs to the frame just presented above.
                 xSemaphoreTake(ctx->trans_sem, 0);
-                xSemaphoreTake(ctx->trans_sem, portMAX_DELAY);
+
+                if (ppa_to_fb) {
+                    // PPA wrote a dedicated DSI frame buffer and the two FBs
+                    // alternate, so the scan-out of this frame cannot collide
+                    // with the next frame's render. Defer the wait to the start
+                    // of the next flush to overlap render + scan-out.
+                    ctx->present_pending = true;
+                } else {
+                    // No PPA rotation: draw_buf is LVGL's own buffer, which LVGL
+                    // may reuse immediately. Must block until scan-out completes
+                    // to avoid tearing (original behavior).
 #if OTOOL_LVGL_PORT_PERF_LOG
-                wait_us += (uint64_t)(esp_timer_get_time() - wait_start_us);
+                    int64_t wait_start_us = esp_timer_get_time();
 #endif
+                    xSemaphoreTake(ctx->trans_sem, portMAX_DELAY);
+#if OTOOL_LVGL_PORT_PERF_LOG
+                    wait_us += (uint64_t)(esp_timer_get_time() - wait_start_us);
+#endif
+                }
             }
 #if OTOOL_LVGL_PORT_PERF_LOG
             disp_perf_record((uint32_t)(phys_w * phys_h),
