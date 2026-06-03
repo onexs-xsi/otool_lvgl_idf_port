@@ -17,6 +17,10 @@ static const char *TAG = "otool_lvgl_port";
 #define OTOOL_LVGL_PORT_PERF_LOG 0
 #endif
 
+#ifndef OTOOL_LVGL_PORT_LOCK_WARN_MS
+#define OTOOL_LVGL_PORT_LOCK_WARN_MS 1000
+#endif
+
 // LVGL 端口上下文
 typedef struct {
     TaskHandle_t task_handle;
@@ -107,6 +111,29 @@ static void lvgl_task_perf_record_lock_timeout(void)
 // LVGL 定时器回调
 #endif
 
+static bool lvgl_task_take_lock(void)
+{
+    TickType_t wait_start = xTaskGetTickCount();
+
+    while (s_port_ctx.running) {
+        if (xSemaphoreTakeRecursive(s_port_ctx.lvgl_mutex,
+                                    pdMS_TO_TICKS(OTOOL_LVGL_PORT_LOCK_WARN_MS)) ==
+            pdTRUE) {
+            return true;
+        }
+
+#if OTOOL_LVGL_PORT_PERF_LOG
+        lvgl_task_perf_record_lock_timeout();
+#endif
+        uint32_t waited_ms =
+            (uint32_t)((xTaskGetTickCount() - wait_start) * portTICK_PERIOD_MS);
+        ESP_LOGW(TAG, "LVGL task: waiting for lock for %lums",
+                 (unsigned long)waited_ms);
+    }
+
+    return false;
+}
+
 static void lvgl_tick_cb(void *arg)
 {
     lv_tick_inc(*(int *)arg);
@@ -122,8 +149,7 @@ static void lvgl_task(void *arg)
     ESP_LOGI(TAG, "LVGL task entering main loop");
 
     while (s_port_ctx.running) {
-        // 使用短超时而不是无限等待
-        if (xSemaphoreTakeRecursive(s_port_ctx.lvgl_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if (lvgl_task_take_lock()) {
 #if OTOOL_LVGL_PORT_PERF_LOG
             int64_t handler_start_us = esp_timer_get_time();
 #endif
@@ -148,11 +174,7 @@ static void lvgl_task(void *arg)
 #endif
             vTaskDelay(pdMS_TO_TICKS(sleep_ms));
         } else {
-#if OTOOL_LVGL_PORT_PERF_LOG
-            lvgl_task_perf_record_lock_timeout();
-#endif
-            ESP_LOGW(TAG, "LVGL task: failed to acquire lock");
-            vTaskDelay(pdMS_TO_TICKS(10));
+            break;
         }
     }
 
