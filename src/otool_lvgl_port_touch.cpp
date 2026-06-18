@@ -386,8 +386,8 @@ lv_indev_t *otool_lvgl_port_add_touch(const otool_lvgl_touch_cfg_t *touch_cfg)
     ctx->disp = touch_cfg->disp;
     ctx->scale.x = (touch_cfg->scale.x > 0) ? touch_cfg->scale.x : 1.0f;
     ctx->scale.y = (touch_cfg->scale.y > 0) ? touch_cfg->scale.y : 1.0f;
-    ctx->rotation = LV_DISPLAY_ROTATION_0;
-    ctx->use_hw_rotation = false;  // Default: use LVGL display rotation
+    ctx->rotation = touch_cfg->initial_rotation;
+    ctx->use_hw_rotation = touch_cfg->initial_rotation != LV_DISPLAY_ROTATION_0;
     ctx->last_touch_cnt = 0;       // Initialize multi-touch counter
     memset(ctx->point_press_time, 0, sizeof(ctx->point_press_time));   // Initialize press time
     memset(ctx->point_repeat_time, 0, sizeof(ctx->point_repeat_time)); // Initialize repeat time
@@ -413,7 +413,11 @@ lv_indev_t *otool_lvgl_port_add_touch(const otool_lvgl_touch_cfg_t *touch_cfg)
 
     ctx->indev = indev;
 
-    ESP_LOGI(TAG, "Touch input device created (scale: %.2f x %.2f)", ctx->scale.x, ctx->scale.y);
+    ESP_LOGI(TAG,
+             "Touch input device created (scale: %.2f x %.2f, rotation: %d degrees)",
+             ctx->scale.x,
+             ctx->scale.y,
+             ctx->rotation * 90);
 
     otool_lvgl_port_unlock();
     return indev;
