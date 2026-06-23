@@ -207,6 +207,13 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
             lv_point_t pt = ctx->last_points[i];
             lv_obj_t *t = lv_indev_search_obj(scr, &pt);
             if (t) {
+                // pressed_obj_pool represents secondary touches only.
+                // The primary target is reported through lv_indev_data_t and
+                // must remain owned by LVGL's pointer indev state machine.
+                if (t == primary_target) {
+                    continue;
+                }
+
                 // Deduplicate
                 bool exists = false;
                 for(int k=0; k<cur_cnt; k++) if(current_objs[k] == t) exists = true;
@@ -222,7 +229,6 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
         // 4. Process Current Targets (Press / Continue)
         for(int i=0; i<cur_cnt && i<10; i++) {
             lv_obj_t *t = current_objs[i];
-            bool is_primary_target = (t == primary_target);
             
             // Check if t was in old pool
             int old_idx = -1;
@@ -239,12 +245,9 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
                 new_press_time[i] = ctx->point_press_time[old_idx];
                 new_repeat_time[i] = ctx->point_repeat_time[old_idx];
                 
-                // Send PRESSING state (Except Primary - LVGL sends it)
-                if(!is_primary_target) {
-                    touch_send_event_if_valid(ctx, t, LV_EVENT_PRESSING);
-                }
+                touch_send_event_if_valid(ctx, t, LV_EVENT_PRESSING);
 
-                // Handle Key Repeat (For BOTH Primary and Secondary)
+                // Handle key repeat for secondary touches.
                 // Skip Checkable objects (like Shift key)
                 if(touch_obj_is_valid(t) && !lv_obj_has_flag(t, LV_OBJ_FLAG_CHECKABLE)) {
                     if (now - new_press_time[i] > 1000) { // 1 sec delay
@@ -264,10 +267,8 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
                 new_repeat_time[i] = now;
                 lv_obj_add_event_cb(t, touch_obj_delete_cb, LV_EVENT_DELETE, ctx);
                 
-                if (!is_primary_target) {
-                    touch_send_event_if_valid(ctx, t, LV_EVENT_PRESSED);
-                    touch_send_event_if_valid(ctx, t, LV_EVENT_CLICKED); // Instant click for secondary
-                }
+                touch_send_event_if_valid(ctx, t, LV_EVENT_PRESSED);
+                touch_send_event_if_valid(ctx, t, LV_EVENT_CLICKED); // Instant click for secondary
             }
         }
 
@@ -275,67 +276,6 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
         for(int j=0; j<10; j++) {
             lv_obj_t *old_t = ctx->pressed_obj_pool[j];
             if(old_t != NULL) {
-                // Object disappeared from touches.
-                
-                // If it was Primary, LVGL handles release.
-                // If it was Secondary (and didn't become primary), we handle it.
-                // Wait, if it becomes Primary, it will be in the new pool (as primary target).
-                // So if it's NOT in new pool (implied by this loop), it is released completely.
-                
-                // But wait, "primary_target" variable is the NEW primary target.
-                // If old_t is not in current_objs, it's released.
-                // We only need to guard against sending event if LVGL will send it.
-                // LVGL sends RELEASED if obj == prev_primary_target.
-                // Since we don't track what LVGL thinks, we rely on:
-                // "Did we simulate the PRESS for this?"
-                // No, we tracked it.
-                
-                // Simplification: If it's not in the new pool, it's released.
-                // Since we are not distinguishing "simulated" vs "real" in the pool (merged),
-                // we must be careful not to double-release Primary.
-                // Does sending extra RELEASED hurt? No, usually fine.
-                // But let's try to be clean.
-                
-                // Actually, for Primary target, we NEVER sent PRESSED.
-                // So sending RELEASED might be unbalanced?
-                // But we don't know if it WAS Primary in the last frame easily without more state.
-                
-                // Safe approach: Only send RELEASED if it is NOT the current Primary somehow?
-                // No, it's gone.
-                // Let's just send it. LVGL objects tolerate redundant RELEASED events usually.
-                
-                // EXCEPTION: Shift keys double-toggling.
-                // If I release Shift (Primary), LVGL sends release. If I send again, might toggle back?
-                // Shift toggles on CLICKED or VALUE_CHANGED usually.
-                // Standard Button toggles on CLICKED. 
-                // Sending RELEASED doesn't trigger CLICKED unless PRESSED was sent.
-                
-                // So, for Secondary fingers, we sent PRESSED. So we MUST send RELEASED.
-                // For Primary finger, we didn't send PRESSED.
-                // If we send RELEASED, `lv_obj_event` calls handler.
-                // Handler sees state.
-                
-                // Let's filter: if this object WAS the primary target in the PREVIOUS frame?
-                // Too complex.
-                // Let's filter based on "Did we send PRESSED?". 
-                // No, we merged the pool.
-                
-                // Revised Strategy:
-                // Only send RELEASED for Secondary logic?
-                // But the pool represents EVERYTHING.
-                // We need to know if it was "Virtual" or "Real".
-                // Let's add a flag in `pressed_obj_pool`? 
-                
-                // Or just assume redundant RELEASED is OK.
-                // LVGL `lv_event_send` just calls callback.
-                // Callback checks state?
-                // `lv_button` doesn't check state. It just reacts.
-                
-                // FIX: Only send RELEASED if we are sure it's not handled by LVGL?
-                // Actually, the loop 2..5 already handles "Handover" logic implicitly?
-                // No.
-                
-                // Let's try sending it. If bugs arise, we fix.
                 touch_send_event_if_valid(ctx, old_t, LV_EVENT_RELEASED);
             }
         }
