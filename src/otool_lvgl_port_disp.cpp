@@ -6,6 +6,8 @@
  * Supports: Default (I2C/SPI/I8080), DSI (MIPI-DSI), RGB interfaces
  */
 
+#include <atomic>
+#include <new>
 #include <string.h>
 #include "sdkconfig.h"
 #include "esp_log.h"
@@ -132,10 +134,14 @@ typedef struct {
     lv_display_t              *disp_drv;
     lv_display_rotation_t     current_rotation;
     SemaphoreHandle_t         trans_sem;
+    // Monotonic VSYNC sequence. on_refresh_done is a periodic VSYNC callback,
+    // not a completion token owned by a particular draw_bitmap call.
+    std::atomic<uint32_t>     vsync_seq{0};
     // Deferred vsync wait: when true, a presented frame is in flight and we
     // must wait for its refresh_done before reusing/overwriting a frame buffer.
-    // Lets LVGL render + PPA-rotate the next frame overlap the current scan-out.
+    // Lets LVGL render the next frame while the current frame scans out.
     bool                      present_pending;
+    uint32_t                  present_vsync_seq;
 
 #if OTOOL_LVGL_PORT_PPA_SUPPORTED
     // PPA rotation context (ESP32-P4 only)
@@ -159,6 +165,9 @@ typedef struct {
         unsigned int use_ppa: 1;
     } flags;
 } otool_disp_ctx_t;
+
+static_assert(std::atomic<uint32_t>::is_always_lock_free,
+              "VSYNC counter must be lock-free because it is updated from an ISR");
 
 /*******************************************************************************
  * Function declarations
@@ -326,10 +335,25 @@ static bool dpi_panel_refresh_done_cb(esp_lcd_panel_handle_t panel, esp_lcd_dpi_
     otool_disp_ctx_t *ctx = (otool_disp_ctx_t *)lv_display_get_driver_data(disp);
 
     if (ctx && ctx->trans_sem) {
+        ctx->vsync_seq.fetch_add(1, std::memory_order_relaxed);
         xSemaphoreGiveFromISR(ctx->trans_sem, &need_yield);
     }
 
     return (need_yield == pdTRUE);
+}
+
+static void wait_for_vsync_after(otool_disp_ctx_t *ctx, uint32_t submitted_seq)
+{
+    if (!ctx || !ctx->trans_sem) {
+        return;
+    }
+
+    // The counting semaphore is only a wake-up mechanism. The sequence is the
+    // source of truth, so a stale signal or a VSYNC racing with the wait cannot
+    // be mistaken for completion of the newly submitted frame.
+    while (ctx->vsync_seq.load(std::memory_order_relaxed) == submitted_seq) {
+        xSemaphoreTake(ctx->trans_sem, portMAX_DELAY);
+    }
 }
 #endif // OTOOL_LVGL_PORT_DSI_SUPPORTED
 
@@ -376,7 +400,7 @@ static void disp_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_
 #if OTOOL_LVGL_PORT_PERF_LOG
                 int64_t wait_start_us = esp_timer_get_time();
 #endif
-                xSemaphoreTake(ctx->trans_sem, portMAX_DELAY);
+                wait_for_vsync_after(ctx, ctx->present_vsync_seq);
 #if OTOOL_LVGL_PORT_PERF_LOG
                 wait_us += (uint64_t)(esp_timer_get_time() - wait_start_us);
 #endif
@@ -426,14 +450,22 @@ static void disp_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_
 #if OTOOL_LVGL_PORT_PERF_LOG
             int64_t draw_start_us = esp_timer_get_time();
 #endif
-            esp_lcd_panel_draw_bitmap(ctx->panel_handle, 0, 0, phys_w, phys_h, draw_buf);
+            esp_err_t draw_ret = esp_lcd_panel_draw_bitmap(ctx->panel_handle, 0, 0,
+                                                           phys_w, phys_h, draw_buf);
 #if OTOOL_LVGL_PORT_PERF_LOG
             draw_us += (uint64_t)(esp_timer_get_time() - draw_start_us);
 #endif
+            if (draw_ret != ESP_OK) {
+                ESP_LOGE(TAG, "DSI draw_bitmap failed: %s", esp_err_to_name(draw_ret));
+                lv_disp_flush_ready(drv);
+                return;
+            }
 
             if (ctx->trans_sem) {
-                // Drain any stale signal so the next refresh_done we observe
-                // belongs to the frame just presented above.
+                // Snapshot after draw_bitmap returns: only a later VSYNC can
+                // complete this submission. Drain the semaphore only as a
+                // wake-up cleanup; vsync_seq preserves any raced event.
+                uint32_t submitted_seq = ctx->vsync_seq.load(std::memory_order_relaxed);
                 xSemaphoreTake(ctx->trans_sem, 0);
 
                 if (ppa_to_fb) {
@@ -441,6 +473,7 @@ static void disp_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_
                     // alternate, so the scan-out of this frame cannot collide
                     // with the next frame's render. Defer the wait to the start
                     // of the next flush to overlap render + scan-out.
+                    ctx->present_vsync_seq = submitted_seq;
                     ctx->present_pending = true;
                 } else {
                     // No PPA rotation: draw_buf is LVGL's own buffer, which LVGL
@@ -449,7 +482,7 @@ static void disp_flush_callback(lv_display_t *drv, const lv_area_t *area, uint8_
 #if OTOOL_LVGL_PORT_PERF_LOG
                     int64_t wait_start_us = esp_timer_get_time();
 #endif
-                    xSemaphoreTake(ctx->trans_sem, portMAX_DELAY);
+                    wait_for_vsync_after(ctx, submitted_seq);
 #if OTOOL_LVGL_PORT_PERF_LOG
                     wait_us += (uint64_t)(esp_timer_get_time() - wait_start_us);
 #endif
@@ -747,7 +780,7 @@ lv_display_t *otool_lvgl_port_add_disp(const otool_lvgl_disp_cfg_t *disp_cfg)
 {
     otool_lvgl_port_lock(0);
 
-    otool_disp_ctx_t *ctx = (otool_disp_ctx_t *)calloc(1, sizeof(otool_disp_ctx_t));
+    otool_disp_ctx_t *ctx = new (std::nothrow) otool_disp_ctx_t{};
     if (!ctx) {
         ESP_LOGE(TAG, "Alloc display context failed");
         otool_lvgl_port_unlock();
@@ -758,7 +791,7 @@ lv_display_t *otool_lvgl_port_add_disp(const otool_lvgl_disp_cfg_t *disp_cfg)
 
     lv_display_t *disp = add_disp_common(disp_cfg, ctx);
     if (!disp) {
-        free(ctx);
+        delete ctx;
         otool_lvgl_port_unlock();
         return NULL;
     }
@@ -789,7 +822,7 @@ lv_display_t *otool_lvgl_port_add_disp_dsi(const otool_lvgl_disp_cfg_t *disp_cfg
 
     otool_lvgl_port_lock(0);
 
-    otool_disp_ctx_t *ctx = (otool_disp_ctx_t *)calloc(1, sizeof(otool_disp_ctx_t));
+    otool_disp_ctx_t *ctx = new (std::nothrow) otool_disp_ctx_t{};
     if (!ctx) {
         ESP_LOGE(TAG, "Alloc display context failed");
         otool_lvgl_port_unlock();
@@ -804,7 +837,7 @@ lv_display_t *otool_lvgl_port_add_disp_dsi(const otool_lvgl_disp_cfg_t *disp_cfg
 
     lv_display_t *disp = add_disp_common(disp_cfg, ctx);
     if (!disp) {
-        free(ctx);
+        delete ctx;
         otool_lvgl_port_unlock();
         return NULL;
     }
@@ -862,7 +895,7 @@ lv_display_t *otool_lvgl_port_add_disp_rgb(const otool_lvgl_disp_cfg_t *disp_cfg
 
     otool_lvgl_port_lock(0);
 
-    otool_disp_ctx_t *ctx = (otool_disp_ctx_t *)calloc(1, sizeof(otool_disp_ctx_t));
+    otool_disp_ctx_t *ctx = new (std::nothrow) otool_disp_ctx_t{};
     if (!ctx) {
         ESP_LOGE(TAG, "Alloc display context failed");
         otool_lvgl_port_unlock();
@@ -874,7 +907,7 @@ lv_display_t *otool_lvgl_port_add_disp_rgb(const otool_lvgl_disp_cfg_t *disp_cfg
 
     lv_display_t *disp = add_disp_common(disp_cfg, ctx);
     if (!disp) {
-        free(ctx);
+        delete ctx;
         otool_lvgl_port_unlock();
         return NULL;
     }
@@ -913,7 +946,7 @@ esp_err_t otool_lvgl_port_remove_disp(lv_display_t *disp)
             vSemaphoreDelete(ctx->trans_sem);
         }
 
-        free(ctx);
+        delete ctx;
     }
 
     return ESP_OK;
