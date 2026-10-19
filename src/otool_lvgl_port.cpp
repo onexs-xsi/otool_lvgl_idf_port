@@ -4,6 +4,8 @@
  */
 
 #include "otool_lvgl_port.h"
+#include "otool_lvgl_metrics.h"
+#include <algorithm>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <esp_heap_caps.h>
@@ -113,12 +115,15 @@ static void lvgl_task_perf_record_lock_timeout(void)
 
 static bool lvgl_task_take_lock(void)
 {
+    const uint64_t lock_start_us = esp_timer_get_time();
     TickType_t wait_start = xTaskGetTickCount();
 
     while (s_port_ctx.running) {
         if (xSemaphoreTakeRecursive(s_port_ctx.lvgl_mutex,
                                     pdMS_TO_TICKS(OTOOL_LVGL_PORT_LOCK_WARN_MS)) ==
             pdTRUE) {
+            const uint64_t now_us = esp_timer_get_time();
+            otool::metrics::recorder.record(otool::metrics::lock, now_us - lock_start_us, now_us);
             return true;
         }
 
@@ -147,13 +152,20 @@ static void lvgl_task(void *arg)
     // 等待一小段时间让系统稳定
     vTaskDelay(pdMS_TO_TICKS(100));
     ESP_LOGI(TAG, "LVGL task entering main loop");
+    uint32_t scheduled_us = uint32_t(esp_timer_get_time());
 
     while (s_port_ctx.running) {
+        const uint64_t now_us = esp_timer_get_time();
+        const int32_t late_us = int32_t(uint32_t(now_us) - scheduled_us);
+        otool::metrics::recorder.record(otool::metrics::scheduling, late_us > 0 ? uint32_t(late_us) : 0, now_us);
         if (lvgl_task_take_lock()) {
+            const uint64_t measured_start_us = esp_timer_get_time();
 #if OTOOL_LVGL_PORT_PERF_LOG
             int64_t handler_start_us = esp_timer_get_time();
 #endif
             uint32_t sleep_ms = lv_timer_handler();
+            const uint64_t measured_end_us = esp_timer_get_time();
+            otool::metrics::recorder.record(otool::metrics::handler, measured_end_us - measured_start_us, measured_end_us);
 #if OTOOL_LVGL_PORT_PERF_LOG
             uint64_t handler_us = (uint64_t)(esp_timer_get_time() - handler_start_us);
 #endif
@@ -172,7 +184,9 @@ static void lvgl_task(void *arg)
 #if OTOOL_LVGL_PORT_PERF_LOG
             lvgl_task_perf_record(raw_sleep_ms, sleep_ms, handler_us);
 #endif
-            vTaskDelay(pdMS_TO_TICKS(sleep_ms));
+            const TickType_t sleep_ticks = std::max(TickType_t(1), pdMS_TO_TICKS(sleep_ms));
+            scheduled_us = uint32_t(esp_timer_get_time()) + uint32_t(sleep_ticks * portTICK_PERIOD_MS * 1000);
+            vTaskDelay(sleep_ticks);
         } else {
             break;
         }
