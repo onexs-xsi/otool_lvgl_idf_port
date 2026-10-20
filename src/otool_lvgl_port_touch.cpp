@@ -108,16 +108,15 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
     assert(ctx != NULL);
     assert(ctx->handle != NULL);
 
-    uint16_t touch_x[10] = {0};
-    uint16_t touch_y[10] = {0};
-    uint16_t touch_strength[10] = {0};
+    esp_lcd_touch_point_data_t touch_points[10] = {};
     uint8_t touch_cnt = 0;
 
-    // Read touch data
-    esp_lcd_touch_read_data(ctx->handle);
-
-    // Get touch coordinates - support up to 10 touch points
-    bool touched = esp_lcd_touch_get_coordinates(ctx->handle, touch_x, touch_y, touch_strength, &touch_cnt, 10);
+    // Read up to 10 touch points. A failed read follows the release path below.
+    esp_err_t touch_err = esp_lcd_touch_read_data(ctx->handle);
+    if (touch_err == ESP_OK) {
+        touch_err = esp_lcd_touch_get_data(ctx->handle, touch_points, &touch_cnt, 10);
+    }
+    const bool touched = touch_err == ESP_OK && touch_cnt > 0;
 
     if (touched && touch_cnt > 10) {
         ESP_LOGW(TAG, "Touch count out of range: %u", touch_cnt);
@@ -146,8 +145,8 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
         
         for (uint8_t i = 0; i < touch_cnt && i < 10; i++) {
             // Apply scale factors
-            int32_t x = (int32_t)(touch_x[i] * ctx->scale.x);
-            int32_t y = (int32_t)(touch_y[i] * ctx->scale.y);
+            int32_t x = (int32_t)(touch_points[i].x * ctx->scale.x);
+            int32_t y = (int32_t)(touch_points[i].y * ctx->scale.y);
 
             // Transform coordinates based on rotation
             if (rotation != LV_DISPLAY_ROTATION_0 && hres > 0 && vres > 0) {
@@ -249,7 +248,7 @@ static void touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data)
 
                 // Handle key repeat for secondary touches.
                 // Skip Checkable objects (like Shift key)
-                if(touch_obj_is_valid(t) && !lv_obj_has_flag(t, LV_OBJ_FLAG_CHECKABLE)) {
+                if(touch_obj_is_valid(t) && !lv_obj_is_checkable(t)) {
                     if (now - new_press_time[i] > 1000) { // 1 sec delay
                         if (now - new_repeat_time[i] > 200) { // 200ms rate
                              touch_send_event_if_valid(ctx, t, LV_EVENT_CLICKED);

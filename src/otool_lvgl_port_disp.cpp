@@ -134,11 +134,11 @@ typedef struct {
     lv_display_t              *disp_drv;
     lv_display_rotation_t     current_rotation;
     SemaphoreHandle_t         trans_sem;
-    // Monotonic VSYNC sequence. on_refresh_done is a periodic VSYNC callback,
-    // not a completion token owned by a particular draw_bitmap call.
+    // Monotonic panel frame completion sequence, emitted on each refresh.
+    // It is not a completion token owned by a particular draw_bitmap call.
     std::atomic<uint32_t>     vsync_seq{0};
     // Deferred vsync wait: when true, a presented frame is in flight and we
-    // must wait for its refresh_done before reusing/overwriting a frame buffer.
+    // must wait for frame completion before reusing/overwriting a frame buffer.
     // Lets LVGL render the next frame while the current frame scans out.
     bool                      present_pending;
     uint32_t                  present_vsync_seq;
@@ -328,7 +328,7 @@ static bool dpi_panel_trans_done_cb(esp_lcd_panel_handle_t panel, esp_lcd_dpi_pa
     return false;
 }
 
-static bool dpi_panel_refresh_done_cb(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
+static bool dpi_panel_frame_buf_complete_cb(esp_lcd_panel_handle_t panel, esp_lcd_dpi_panel_event_data_t *edata, void *user_ctx)
 {
     BaseType_t need_yield = pdFALSE;
     lv_display_t *disp = (lv_display_t *)user_ctx;
@@ -861,7 +861,11 @@ lv_display_t *otool_lvgl_port_add_disp_dsi(const otool_lvgl_disp_cfg_t *disp_cfg
     // Register DPI panel callbacks
     esp_lcd_dpi_panel_event_callbacks_t cbs = {};
     if (dsi_cfg->flags.avoid_tearing) {
-        cbs.on_refresh_done = dpi_panel_refresh_done_cb;
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(6, 1, 0)
+        cbs.on_frame_buf_complete = dpi_panel_frame_buf_complete_cb;
+#else
+        cbs.on_refresh_done = dpi_panel_frame_buf_complete_cb;
+#endif
     } else {
         cbs.on_color_trans_done = dpi_panel_trans_done_cb;
     }

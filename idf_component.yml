@@ -1,4 +1,7 @@
 version: "1.0.0"
 dependencies:
   lvgl/lvgl:
-    version: "^9.4.0"
+    version: "^9.6.0"
+  espressif/esp_lcd_touch:
+    version: "^1.2.1"
+    public: true
